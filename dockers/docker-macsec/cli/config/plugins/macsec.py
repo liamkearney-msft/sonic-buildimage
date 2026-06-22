@@ -106,6 +106,18 @@ def is_hexstring(hexstring: str):
         return False
 
 
+def validate_cak(ctx, cipher_suite, cak, field_name):
+    """Validate a CAK hex string against the profile's cipher suite."""
+    if "128" in cipher_suite:
+        if len(cak) != 66:
+            ctx.fail("Expect the length of {} is 66, but got {}".format(field_name, len(cak)))
+    elif "256" in cipher_suite:
+        if len(cak) != 130:
+            ctx.fail("Expect the length of {} is 130, but got {}".format(field_name, len(cak)))
+    if not is_hexstring(cak):
+        ctx.fail("Expect the {} is valid hex string".format(field_name))
+
+
 #
 # 'add' command ('config macsec profile add ...')
 #
@@ -137,14 +149,7 @@ def add_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, polic
 
     profile_table["cipher_suite"] = cipher_suite
 
-    if "128" in cipher_suite:
-        if len(primary_cak) != 66:
-            ctx.fail("Expect the length of CAK is 66, but got {}".format(len(primary_cak)))
-    elif "256" in cipher_suite:
-        if len(primary_cak) != 130:
-            ctx.fail("Expect the length of CAK is 130, but got {}".format(len(primary_cak)))
-    if not is_hexstring(primary_cak):
-        ctx.fail("Expect the primary_cak is valid hex string")
+    validate_cak(ctx, cipher_suite, primary_cak, "primary_cak")
     if not is_hexstring(primary_ckn):
         ctx.fail("Expect the primary_ckn is valid hex string")
     profile_table["primary_cak"] = primary_cak
@@ -170,6 +175,56 @@ def add_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, polic
         else:
             profile_table[k] = str(v)
     config_db.set_entry("MACSEC_PROFILE", profile, profile_table)
+
+
+#
+# 'update' command ('config macsec profile update ...')
+#
+@macsec_profile.command('update')
+@click.argument('profile', metavar='<profile_name>', required=True)
+@click.option('--primary_cak', metavar='<primary_cak>', required=False, type=str, help="New primary Connectivity Association Key.")
+@click.option('--primary_ckn', metavar='<primary_ckn>', required=False, type=str, help="New primary CAK Name.")
+@click.option('--fallback_cak', metavar='<fallback_cak>', required=False, type=str, help="New fallback Connectivity Association Key.")
+@click.option('--fallback_ckn', metavar='<fallback_ckn>', required=False, type=str, help="New fallback CAK Name.")
+def update_profile(profile, primary_cak, primary_ckn, fallback_cak, fallback_ckn):
+    """
+    Rotate the primary or fallback key of an existing MACsec profile in place.
+
+    Overwrites the key fields of a profile that may already be bound to ports,
+    triggering a hitless key rotation. Rotate one key (primary or fallback) at a
+    time; supply the CAK and CKN of a pair together.
+    """
+    ctx = click.get_current_context()
+    config_db = ctx.obj
+
+    profile_entry = config_db.get_entry('MACSEC_PROFILE', profile)
+    if len(profile_entry) == 0:
+        ctx.fail("profile {} doesn't exist".format(profile))
+
+    if (primary_cak is None) != (primary_ckn is None):
+        ctx.fail("--primary_cak and --primary_ckn must be supplied together")
+    if (fallback_cak is None) != (fallback_ckn is None):
+        ctx.fail("--fallback_cak and --fallback_ckn must be supplied together")
+    if primary_cak is None and fallback_cak is None:
+        ctx.fail("Nothing to update: supply a primary or fallback key pair")
+
+    cipher_suite = profile_entry.get("cipher_suite", "GCM-AES-128")
+
+    if primary_cak is not None:
+        validate_cak(ctx, cipher_suite, primary_cak, "primary_cak")
+        if not is_hexstring(primary_ckn):
+            ctx.fail("Expect the primary_ckn is valid hex string")
+        profile_entry["primary_cak"] = primary_cak
+        profile_entry["primary_ckn"] = primary_ckn
+
+    if fallback_cak is not None:
+        validate_cak(ctx, cipher_suite, fallback_cak, "fallback_cak")
+        if not is_hexstring(fallback_ckn):
+            ctx.fail("Expect the fallback_ckn is valid hex string")
+        profile_entry["fallback_cak"] = fallback_cak
+        profile_entry["fallback_ckn"] = fallback_ckn
+
+    config_db.set_entry("MACSEC_PROFILE", profile, profile_entry)
 
 
 #

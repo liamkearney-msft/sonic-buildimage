@@ -133,6 +133,61 @@ class TestConfigMACsec(object):
         assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
 
 
+    def test_macsec_update_profile(self, mock_cfgdb):
+        cfgdb = mock_cfgdb
+        runner = CliRunner()
+
+        new_primary_cak = "55416467405343556d400e000e030307075f0e5050000e5560e000802065d574"
+        new_primary_ckn = "98765432109876543210987654321098"
+        fallback_cak = "9999646740534355560e000802065d574d400e000e030307075f0e5050000e23"
+        fallback_ckn = "11112222333344445555666677778888"
+
+        # Update a nonexistent profile -> fail
+        result = runner.invoke(macsec.macsec, ["profile", "update", "test",
+                "--primary_cak=" + new_primary_cak, "--primary_ckn=" + new_primary_ckn], obj=cfgdb)
+        assert result.exit_code != 0
+
+        result = runner.invoke(macsec.macsec, ["profile", "add", "test",
+                "--primary_cak=" + primary_cak, "--primary_ckn=" + primary_ckn], obj=cfgdb)
+        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
+
+        # No key supplied -> fail
+        result = runner.invoke(macsec.macsec, ["profile", "update", "test"], obj=cfgdb)
+        assert result.exit_code != 0
+
+        # Unpaired primary -> fail
+        result = runner.invoke(macsec.macsec, ["profile", "update", "test",
+                "--primary_cak=" + new_primary_cak], obj=cfgdb)
+        assert result.exit_code != 0
+
+        # Invalid primary cak length -> fail
+        result = runner.invoke(macsec.macsec, ["profile", "update", "test",
+                "--primary_cak=abcd", "--primary_ckn=" + new_primary_ckn], obj=cfgdb)
+        assert result.exit_code != 0
+
+        # Valid primary rotation, overwrites in place, preserves other fields
+        result = runner.invoke(macsec.macsec, ["profile", "update", "test",
+                "--primary_cak=" + new_primary_cak, "--primary_ckn=" + new_primary_ckn], obj=cfgdb)
+        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
+        profile_table = cfgdb.get_entry("MACSEC_PROFILE", "test")
+        assert profile_table["primary_cak"] == new_primary_cak
+        assert profile_table["primary_ckn"] == new_primary_ckn
+        assert profile_table["cipher_suite"] == "GCM-AES-128"
+        assert "fallback_cak" not in profile_table
+
+        # Add a fallback key, primary is preserved
+        result = runner.invoke(macsec.macsec, ["profile", "update", "test",
+                "--fallback_cak=" + fallback_cak, "--fallback_ckn=" + fallback_ckn], obj=cfgdb)
+        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
+        profile_table = cfgdb.get_entry("MACSEC_PROFILE", "test")
+        assert profile_table["fallback_cak"] == fallback_cak
+        assert profile_table["fallback_ckn"] == fallback_ckn
+        assert profile_table["primary_cak"] == new_primary_cak
+
+        result = runner.invoke(macsec.macsec, ["profile", "del", "test"], obj=cfgdb)
+        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
+
+
     def test_macsec_invalid_operation(self, mock_cfgdb):
         cfgdb = mock_cfgdb
         runner = CliRunner()
