@@ -165,7 +165,34 @@ class TestConfigMACsec(object):
                 "--primary_cak=abcd", "--primary_ckn=" + new_primary_ckn], obj=cfgdb)
         assert result.exit_code != 0
 
-        # Valid primary rotation, overwrites in place, preserves other fields
+        # Updating primary and fallback at the same time -> fail (one at a time)
+        result = runner.invoke(macsec.macsec, ["profile", "update", "test",
+                "--primary_cak=" + new_primary_cak, "--primary_ckn=" + new_primary_ckn,
+                "--fallback_cak=" + fallback_cak, "--fallback_ckn=" + fallback_ckn], obj=cfgdb)
+        assert result.exit_code != 0
+        profile_table = cfgdb.get_entry("MACSEC_PROFILE", "test")
+        assert profile_table["primary_cak"] == primary_cak
+        assert "fallback_cak" not in profile_table
+
+        # Primary rotation with no fallback configured -> fail (config-level reject)
+        result = runner.invoke(macsec.macsec, ["profile", "update", "test",
+                "--primary_cak=" + new_primary_cak, "--primary_ckn=" + new_primary_ckn], obj=cfgdb)
+        assert result.exit_code != 0
+        # Config DB is left unchanged by the rejected primary rotation
+        profile_table = cfgdb.get_entry("MACSEC_PROFILE", "test")
+        assert profile_table["primary_cak"] == primary_cak
+        assert "fallback_cak" not in profile_table
+
+        # Add a fallback key (fallback-only update is allowed), primary preserved
+        result = runner.invoke(macsec.macsec, ["profile", "update", "test",
+                "--fallback_cak=" + fallback_cak, "--fallback_ckn=" + fallback_ckn], obj=cfgdb)
+        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
+        profile_table = cfgdb.get_entry("MACSEC_PROFILE", "test")
+        assert profile_table["fallback_cak"] == fallback_cak
+        assert profile_table["fallback_ckn"] == fallback_ckn
+        assert profile_table["primary_cak"] == primary_cak
+
+        # Valid primary rotation now that a fallback exists, overwrites in place
         result = runner.invoke(macsec.macsec, ["profile", "update", "test",
                 "--primary_cak=" + new_primary_cak, "--primary_ckn=" + new_primary_ckn], obj=cfgdb)
         assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
@@ -173,16 +200,8 @@ class TestConfigMACsec(object):
         assert profile_table["primary_cak"] == new_primary_cak
         assert profile_table["primary_ckn"] == new_primary_ckn
         assert profile_table["cipher_suite"] == "GCM-AES-128"
-        assert "fallback_cak" not in profile_table
-
-        # Add a fallback key, primary is preserved
-        result = runner.invoke(macsec.macsec, ["profile", "update", "test",
-                "--fallback_cak=" + fallback_cak, "--fallback_ckn=" + fallback_ckn], obj=cfgdb)
-        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
-        profile_table = cfgdb.get_entry("MACSEC_PROFILE", "test")
+        # Fallback is preserved across a primary rotation
         assert profile_table["fallback_cak"] == fallback_cak
-        assert profile_table["fallback_ckn"] == fallback_ckn
-        assert profile_table["primary_cak"] == new_primary_cak
 
         result = runner.invoke(macsec.macsec, ["profile", "del", "test"], obj=cfgdb)
         assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)

@@ -207,6 +207,25 @@ def update_profile(profile, primary_cak, primary_ckn, fallback_cak, fallback_ckn
         ctx.fail("--fallback_cak and --fallback_ckn must be supplied together")
     if primary_cak is None and fallback_cak is None:
         ctx.fail("Nothing to update: supply a primary or fallback key pair")
+    if primary_cak is not None and fallback_cak is not None:
+        ctx.fail("Cannot update the primary and fallback keys at the same time; "
+                 "rotate one key at a time so a stable session carries traffic "
+                 "across each rotation.")
+
+    # A primary key rotation moves traffic onto the fallback while the new
+    # primary is being established, so a fallback must exist. Reject up front
+    # (config level, no MKA state needed) when the profile has no fallback
+    # configured. The fallback still being *established* (a live peer) is
+    # enforced separately by MACsec Mgr against live MKA state.
+    if primary_cak is not None:
+        has_fallback = bool(profile_entry.get("fallback_cak") and
+                            profile_entry.get("fallback_ckn"))
+        if not has_fallback:
+            ctx.fail(
+                "Cannot rotate the primary key of profile '{0}': no fallback key is "
+                "configured to carry traffic during the rotation. Configure a fallback "
+                "first with 'config macsec profile update {0} --fallback_cak <cak> "
+                "--fallback_ckn <ckn>'.".format(profile))
 
     cipher_suite = profile_entry.get("cipher_suite", "GCM-AES-128")
 
