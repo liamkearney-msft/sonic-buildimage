@@ -83,6 +83,49 @@ class TestConfigMACsec(object):
         if "rekey_period" in profile_map:
             assert profile_table["rekey_period"] == str(profile_map["rekey_period"])
 
+    def test_macsec_fallback_profile(self, mock_cfgdb):
+        cfgdb = mock_cfgdb
+        runner = CliRunner()
+
+        fallback_ckn = "98765432109876543210987654321098"
+
+        # Valid primary + fallback CA
+        result = runner.invoke(macsec.macsec, ["profile", "add", profile_name,
+                "--primary_cak=" + primary_cak, "--primary_ckn=" + primary_ckn,
+                "--fallback_cak=" + primary_cak, "--fallback_ckn=" + fallback_ckn],
+                obj=cfgdb)
+        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
+        profile_table = cfgdb.get_entry("MACSEC_PROFILE", profile_name)
+        assert profile_table["fallback_cak"] == primary_cak
+        assert profile_table["fallback_ckn"] == fallback_ckn
+        runner.invoke(macsec.macsec, ["profile", "del", profile_name], obj=cfgdb)
+
+        # fallback_cak without fallback_ckn is rejected
+        result = runner.invoke(macsec.macsec, ["profile", "add", profile_name,
+                "--primary_cak=" + primary_cak, "--primary_ckn=" + primary_ckn,
+                "--fallback_cak=" + primary_cak], obj=cfgdb)
+        assert result.exit_code != 0
+
+        # fallback_ckn without fallback_cak is rejected
+        result = runner.invoke(macsec.macsec, ["profile", "add", profile_name,
+                "--primary_cak=" + primary_cak, "--primary_ckn=" + primary_ckn,
+                "--fallback_ckn=" + fallback_ckn], obj=cfgdb)
+        assert result.exit_code != 0
+
+        # fallback_ckn equal to primary_ckn is rejected
+        result = runner.invoke(macsec.macsec, ["profile", "add", profile_name,
+                "--primary_cak=" + primary_cak, "--primary_ckn=" + primary_ckn,
+                "--fallback_cak=" + primary_cak, "--fallback_ckn=" + primary_ckn],
+                obj=cfgdb)
+        assert result.exit_code != 0
+
+        # Invalid fallback cak length for the cipher suite is rejected
+        result = runner.invoke(macsec.macsec, ["profile", "add", profile_name,
+                "--primary_cak=" + primary_cak, "--primary_ckn=" + primary_ckn,
+                "--fallback_cak=abcd", "--fallback_ckn=" + fallback_ckn],
+                obj=cfgdb)
+        assert result.exit_code != 0
+
     def test_macsec_invalid_profile(self, mock_cfgdb):
         cfgdb = mock_cfgdb
         runner = CliRunner()

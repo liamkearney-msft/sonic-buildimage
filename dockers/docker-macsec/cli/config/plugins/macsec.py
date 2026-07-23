@@ -106,6 +106,18 @@ def is_hexstring(hexstring: str):
         return False
 
 
+def check_cak_length(ctx, cipher_suite, cak, field_name):
+    """Validate that a CAK hex string has the length required by the cipher suite."""
+    if "128" in cipher_suite:
+        if len(cak) != 66:
+            ctx.fail("Expect the length of {} is 66, but got {}".format(field_name, len(cak)))
+    elif "256" in cipher_suite:
+        if len(cak) != 130:
+            ctx.fail("Expect the length of {} is 130, but got {}".format(field_name, len(cak)))
+    if not is_hexstring(cak):
+        ctx.fail("Expect the {} is valid hex string".format(field_name))
+
+
 #
 # 'add' command ('config macsec profile add ...')
 #
@@ -115,12 +127,14 @@ def is_hexstring(hexstring: str):
 @click.option('--cipher_suite', metavar='<cipher_suite>', required=False, default="GCM-AES-128", show_default=True, type=click.Choice(["GCM-AES-128", "GCM-AES-256", "GCM-AES-XPN-128", "GCM-AES-XPN-256"]), help="The cipher suite for MACsec.")
 @click.option('--primary_cak', metavar='<primary_cak>', required=True, type=str, help="Primary Connectivity Association Key.")
 @click.option('--primary_ckn', metavar='<primary_cak>', required=True, type=str, help="Primary CAK Name.")
+@click.option('--fallback_cak', metavar='<fallback_cak>', required=False, default=None, type=str, help="Fallback Connectivity Association Key, used as a standby CA. Must be provided together with --fallback_ckn.")
+@click.option('--fallback_ckn', metavar='<fallback_ckn>', required=False, default=None, type=str, help="Fallback CAK Name. Must differ from --primary_ckn and be provided together with --fallback_cak.")
 @click.option('--policy', metavar='<policy>', required=False, default="security", show_default=True, type=click.Choice(["integrity_only", "security"]), help="MACsec policy. INTEGRITY_ONLY: All traffic, except EAPOL, will be converted to MACsec packets without encryption.  SECURITY: All traffic, except EAPOL, will be encrypted by SecY.")
 @click.option('--enable_replay_protect/--disable_replay_protect', metavar='<replay_protect>', required=False, default=False, show_default=True, is_flag=True, help="Whether enable replay protect.")
 @click.option('--replay_window', metavar='<enable_replay_protect>', required=False, default=0, show_default=True, type=click.IntRange(0, 2**32), help="Replay window size that is the number of packets that could be out of order. This field works only if ENABLE_REPLAY_PROTECT is true.")
 @click.option('--send_sci/--no_send_sci', metavar='<send_sci>', required=False, default=True, show_default=True, is_flag=True, help="Send SCI in SecTAG field of MACsec header.")
 @click.option('--rekey_period', metavar='<rekey_period>', required=False, default=0, show_default=True, type=click.IntRange(min=0), help="The period of proactively refresh (Unit second).")
-def add_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, policy, enable_replay_protect, replay_window, send_sci, rekey_period):
+def add_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fallback_cak, fallback_ckn, policy, enable_replay_protect, replay_window, send_sci, rekey_period):
     """
     Add MACsec profile
     """
@@ -137,18 +151,25 @@ def add_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, polic
 
     profile_table["cipher_suite"] = cipher_suite
 
-    if "128" in cipher_suite:
-        if len(primary_cak) != 66:
-            ctx.fail("Expect the length of CAK is 66, but got {}".format(len(primary_cak)))
-    elif "256" in cipher_suite:
-        if len(primary_cak) != 130:
-            ctx.fail("Expect the length of CAK is 130, but got {}".format(len(primary_cak)))
-    if not is_hexstring(primary_cak):
-        ctx.fail("Expect the primary_cak is valid hex string")
+    check_cak_length(ctx, cipher_suite, primary_cak, "primary_cak")
     if not is_hexstring(primary_ckn):
         ctx.fail("Expect the primary_ckn is valid hex string")
     profile_table["primary_cak"] = primary_cak
     profile_table["primary_ckn"] = primary_ckn
+
+    # Fallback CA is optional. When supplied, both the key and its name are
+    # required together, the key must match the cipher suite, and the fallback
+    # CKN must differ from the primary CKN.
+    if (fallback_cak is None) != (fallback_ckn is None):
+        ctx.fail("--fallback_cak and --fallback_ckn must be provided together")
+    if fallback_cak is not None:
+        check_cak_length(ctx, cipher_suite, fallback_cak, "fallback_cak")
+        if not is_hexstring(fallback_ckn):
+            ctx.fail("Expect the fallback_ckn is valid hex string")
+        if fallback_ckn == primary_ckn:
+            ctx.fail("fallback_ckn must be different from primary_ckn")
+        profile_table["fallback_cak"] = fallback_cak
+        profile_table["fallback_ckn"] = fallback_ckn
 
     profile_table["policy"] = policy
 
