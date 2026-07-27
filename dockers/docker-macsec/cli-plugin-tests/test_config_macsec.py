@@ -126,6 +126,94 @@ class TestConfigMACsec(object):
                 obj=cfgdb)
         assert result.exit_code != 0
 
+    def test_macsec_update_profile(self, mock_cfgdb):
+        cfgdb = mock_cfgdb
+        runner = CliRunner()
+
+        rotated_cak = "1163647040534355560e000802065d574d400e000e030307075f0e5050000e5542"
+        rotated_ckn = "abcdef01234567890123456789012345"
+        fallback_ckn = "98765432109876543210987654321098"
+        second_fallback_ckn = "11112222333344445555666677778888"
+
+        # Updating a profile that does not exist is rejected.
+        result = runner.invoke(macsec.macsec, ["profile", "update", profile_name,
+                "--primary_cak=" + primary_cak, "--primary_ckn=" + rotated_ckn], obj=cfgdb)
+        assert result.exit_code != 0
+
+        # Profile with primary only: rotating the primary is refused because no
+        # fallback CA is established to carry traffic during the swap.
+        result = runner.invoke(macsec.macsec, ["profile", "add", profile_name,
+                "--primary_cak=" + primary_cak, "--primary_ckn=" + primary_ckn], obj=cfgdb)
+        assert result.exit_code == 0
+        result = runner.invoke(macsec.macsec, ["profile", "update", profile_name,
+                "--primary_cak=" + rotated_cak, "--primary_ckn=" + rotated_ckn], obj=cfgdb)
+        assert result.exit_code != 0
+        # The refused rotation must not have changed the primary.
+        assert cfgdb.get_entry("MACSEC_PROFILE", profile_name)["primary_ckn"] == primary_ckn
+
+        # Adding a fallback in the SAME command as the rotation does not count:
+        # the fallback is not live yet, so the rotation is still refused.
+        result = runner.invoke(macsec.macsec, ["profile", "update", profile_name,
+                "--primary_cak=" + rotated_cak, "--primary_ckn=" + rotated_ckn,
+                "--fallback_cak=" + primary_cak, "--fallback_ckn=" + fallback_ckn], obj=cfgdb)
+        assert result.exit_code != 0
+        assert cfgdb.get_entry("MACSEC_PROFILE", profile_name)["primary_ckn"] == primary_ckn
+
+        # Establish a fallback first (no primary change).
+        result = runner.invoke(macsec.macsec, ["profile", "update", profile_name,
+                "--fallback_cak=" + primary_cak, "--fallback_ckn=" + fallback_ckn], obj=cfgdb)
+        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
+        profile_table = cfgdb.get_entry("MACSEC_PROFILE", profile_name)
+        assert profile_table["primary_ckn"] == primary_ckn
+        assert profile_table["fallback_ckn"] == fallback_ckn
+
+        # With a fallback established, rotating the primary is now allowed and
+        # leaves unrelated fields (priority, policy, ...) intact.
+        result = runner.invoke(macsec.macsec, ["profile", "update", profile_name,
+                "--primary_cak=" + rotated_cak, "--primary_ckn=" + rotated_ckn], obj=cfgdb)
+        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
+        profile_table = cfgdb.get_entry("MACSEC_PROFILE", profile_name)
+        assert profile_table["primary_cak"] == rotated_cak
+        assert profile_table["primary_ckn"] == rotated_ckn
+        assert profile_table["fallback_ckn"] == fallback_ckn
+        assert profile_table["priority"] == "255"
+        assert profile_table["cipher_suite"] == "GCM-AES-128"
+
+        # A fallback CKN equal to the primary CKN is rejected.
+        result = runner.invoke(macsec.macsec, ["profile", "update", profile_name,
+                "--fallback_cak=" + primary_cak, "--fallback_ckn=" + rotated_ckn], obj=cfgdb)
+        assert result.exit_code != 0
+
+        # --remove_fallback is mutually exclusive with a new fallback.
+        result = runner.invoke(macsec.macsec, ["profile", "update", profile_name,
+                "--remove_fallback",
+                "--fallback_cak=" + primary_cak, "--fallback_ckn=" + second_fallback_ckn], obj=cfgdb)
+        assert result.exit_code != 0
+
+        # Promote the fallback to primary while installing a new fallback (swap).
+        result = runner.invoke(macsec.macsec, ["profile", "update", profile_name,
+                "--primary_cak=" + primary_cak, "--primary_ckn=" + fallback_ckn,
+                "--fallback_cak=" + primary_cak, "--fallback_ckn=" + second_fallback_ckn], obj=cfgdb)
+        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
+        profile_table = cfgdb.get_entry("MACSEC_PROFILE", profile_name)
+        assert profile_table["primary_ckn"] == fallback_ckn
+        assert profile_table["fallback_ckn"] == second_fallback_ckn
+
+        # Removing the fallback is supported (the sanctioned alternative to a
+        # raw CONFIG_DB HDEL).
+        result = runner.invoke(macsec.macsec, ["profile", "update", profile_name,
+                "--remove_fallback"], obj=cfgdb)
+        assert result.exit_code == 0, "exit code: {}, Exception: {}, Traceback: {}".format(result.exit_code, result.exception, result.exc_info)
+        profile_table = cfgdb.get_entry("MACSEC_PROFILE", profile_name)
+        assert "fallback_ckn" not in profile_table
+        assert "fallback_cak" not in profile_table
+
+        # An update that changes nothing is rejected.
+        result = runner.invoke(macsec.macsec, ["profile", "update", profile_name], obj=cfgdb)
+        assert result.exit_code != 0
+
+        runner.invoke(macsec.macsec, ["profile", "del", profile_name], obj=cfgdb)
+
     def test_macsec_invalid_profile(self, mock_cfgdb):
         cfgdb = mock_cfgdb
         runner = CliRunner()

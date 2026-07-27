@@ -194,6 +194,100 @@ def add_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fallb
 
 
 #
+# 'update' command ('config macsec profile update ...')
+#
+@macsec_profile.command('update')
+@click.argument('profile', metavar='<profile_name>', required=True)
+@click.option('--primary_cak', metavar='<primary_cak>', required=False, default=None, type=str, help="New primary Connectivity Association Key. Must be provided together with --primary_ckn to rotate the primary CA.")
+@click.option('--primary_ckn', metavar='<primary_ckn>', required=False, default=None, type=str, help="New primary CAK Name. Must be provided together with --primary_cak.")
+@click.option('--fallback_cak', metavar='<fallback_cak>', required=False, default=None, type=str, help="New fallback Connectivity Association Key. Must be provided together with --fallback_ckn.")
+@click.option('--fallback_ckn', metavar='<fallback_ckn>', required=False, default=None, type=str, help="New fallback CAK Name. Must be provided together with --fallback_cak and differ from the primary CKN.")
+@click.option('--remove_fallback', is_flag=True, default=False, help="Remove the fallback CA from the profile. Mutually exclusive with --fallback_cak/--fallback_ckn.")
+def update_profile(profile, primary_cak, primary_ckn, fallback_cak, fallback_ckn, remove_fallback):
+    """
+    Update the key material of an existing MACsec profile.
+
+    Rotate the primary CA and/or change the fallback CA in place, without
+    tearing MACsec down. This is the supported way to rotate keys; editing
+    CONFIG_DB directly is not.
+
+    A primary rotation is only hitless when a fallback CA is already
+    established to carry traffic while the old primary is retired and the new
+    one negotiates. Rotating the primary is therefore refused unless the
+    profile already has a fallback configured, or the new primary CKN is the
+    current fallback being promoted. A fallback added in the same command does
+    not count: it is not live yet.
+    """
+    ctx = click.get_current_context()
+    config_db = ctx.obj
+
+    profile_entry = config_db.get_entry('MACSEC_PROFILE', profile)
+    if len(profile_entry) == 0:
+        ctx.fail("{} doesn't exist".format(profile))
+
+    if (primary_cak is None) != (primary_ckn is None):
+        ctx.fail("--primary_cak and --primary_ckn must be provided together")
+    if (fallback_cak is None) != (fallback_ckn is None):
+        ctx.fail("--fallback_cak and --fallback_ckn must be provided together")
+    if remove_fallback and (fallback_cak is not None or fallback_ckn is not None):
+        ctx.fail("--remove_fallback cannot be combined with --fallback_cak/--fallback_ckn")
+    if primary_cak is None and fallback_cak is None and not remove_fallback:
+        ctx.fail("nothing to update: provide --primary_cak/--primary_ckn, "
+                 "--fallback_cak/--fallback_ckn, or --remove_fallback")
+
+    cipher_suite = profile_entry.get("cipher_suite", "GCM-AES-128")
+    old_primary_ckn = profile_entry.get("primary_ckn", "")
+    old_fallback_ckn = profile_entry.get("fallback_ckn", "")
+
+    # set_entry replaces the whole record, so work on a copy of the existing
+    # entry to keep unrelated fields (priority, policy, ...) intact.
+    updated = dict(profile_entry)
+
+    new_primary_ckn = primary_ckn if primary_ckn is not None else old_primary_ckn
+
+    if primary_cak is not None:
+        check_cak_length(ctx, cipher_suite, primary_cak, "primary_cak")
+        if not is_hexstring(primary_ckn):
+            ctx.fail("Expect the primary_ckn is valid hex string")
+        updated["primary_cak"] = primary_cak
+        updated["primary_ckn"] = primary_ckn
+
+    if remove_fallback:
+        updated.pop("fallback_cak", None)
+        updated.pop("fallback_ckn", None)
+    elif fallback_cak is not None:
+        check_cak_length(ctx, cipher_suite, fallback_cak, "fallback_cak")
+        if not is_hexstring(fallback_ckn):
+            ctx.fail("Expect the fallback_ckn is valid hex string")
+        if fallback_ckn == new_primary_ckn:
+            ctx.fail("fallback_ckn must be different from primary_ckn")
+        updated["fallback_cak"] = fallback_cak
+        updated["fallback_ckn"] = fallback_ckn
+
+    # Command-time guard mirroring macsecmgr: a primary rotation is only hitless
+    # if a fallback CA is already established to carry traffic during the swap.
+    if new_primary_ckn != old_primary_ckn:
+        promoting_fallback = bool(old_fallback_ckn) and new_primary_ckn == old_fallback_ckn
+        if not promoting_fallback and not old_fallback_ckn:
+            ctx.fail(
+                "cannot rotate the primary CAK of profile '{0}': no fallback CA "
+                "is established to carry traffic during the rotation. Configure a "
+                "fallback CAK first (config macsec profile update {0} "
+                "--fallback_cak ... --fallback_ckn ...) and let it converge "
+                "before rotating the primary.".format(profile))
+
+    # A promoted fallback must not remain configured as the fallback too, or the
+    # primary and fallback CKNs would collide.
+    if updated.get("fallback_ckn") and updated.get("fallback_ckn") == updated.get("primary_ckn"):
+        ctx.fail(
+            "fallback_ckn would equal primary_ckn; when promoting the fallback to "
+            "primary, also set a new fallback (--fallback_cak/--fallback_ckn) or "
+            "remove it (--remove_fallback)")
+
+    config_db.set_entry("MACSEC_PROFILE", profile, updated)
+
+
+#
 # 'del' command ('config macsec profile del ...')
 #
 @macsec_profile.command('del')
