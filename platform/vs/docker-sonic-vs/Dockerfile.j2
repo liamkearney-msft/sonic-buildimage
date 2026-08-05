@@ -133,6 +133,7 @@ COPY --from=fpm-frr frr/supervisord/supervisord.conf.common.j2 /usr/share/sonic/
 COPY --from=teamd supervisord.conf.common.j2 /usr/share/sonic/templates/supervisord.conf.teamd.j2
 COPY --from=nat supervisord.conf.common.j2 /usr/share/sonic/templates/supervisord.conf.nat.j2
 COPY --from=sflow supervisord.conf.common.j2 /usr/share/sonic/templates/supervisord.conf.sflow.j2
+COPY --from=macsec supervisord.conf.common.j2 /usr/share/sonic/templates/supervisord.conf.macsec.j2
 COPY --from=orchagent supervisord.conf.common.j2 /usr/share/sonic/templates/supervisord.conf.swss.j2
 COPY --from=lldp start.sh /usr/bin/start-lldp.sh
 RUN chmod +x /usr/bin/start-lldp.sh
@@ -159,7 +160,7 @@ COPY ["hwsku.json", "/usr/share/sonic/device/x86_64-kvm_x86_64-r0/Mellanox-SN270
 
 RUN mkdir -p /etc/supervisor/conf.d/
 RUN sonic-cfggen -a "{\"ENABLE_ASAN\":\"{{ENABLE_ASAN}}\"}" -t /usr/share/sonic/templates/supervisord.conf.j2 > /etc/supervisor/conf.d/supervisord.conf
-RUN rm -f /usr/share/sonic/templates/supervisord.conf.j2 /usr/share/sonic/templates/supervisord.conf.lldp.j2 /usr/share/sonic/templates/supervisord.conf.frr.j2 /usr/share/sonic/templates/supervisord.conf.swss.j2 /usr/share/sonic/templates/supervisord.conf.teamd.j2 /usr/share/sonic/templates/supervisord.conf.nat.j2 /usr/share/sonic/templates/supervisord.conf.sflow.j2
+RUN rm -f /usr/share/sonic/templates/supervisord.conf.j2 /usr/share/sonic/templates/supervisord.conf.lldp.j2 /usr/share/sonic/templates/supervisord.conf.frr.j2 /usr/share/sonic/templates/supervisord.conf.swss.j2 /usr/share/sonic/templates/supervisord.conf.teamd.j2 /usr/share/sonic/templates/supervisord.conf.nat.j2 /usr/share/sonic/templates/supervisord.conf.sflow.j2 /usr/share/sonic/templates/supervisord.conf.macsec.j2
 
 {%- if ENABLE_ASAN == "y" %}
 RUN mkdir -p /var/log/asan
@@ -185,6 +186,28 @@ COPY ["frr/zebra.conf", "/etc/frr/"]
 # SWSS feature (from docker-orchagent via --build-context)
 {% set copy_from = "orchagent" %}
 {% include "docker-orchagent/Dockerfile.common.j2" %}
+
+# MACsec feature (from docker-macsec via --build-context)
+{% set copy_from = "macsec" %}
+{% include "docker-macsec/Dockerfile.common.j2" %}
+
+# The MACsec CLI plugins are normally installed onto the host by
+# sonic-package-manager, which does not exist inside docker-sonic-vs.
+# Install them directly into the sonic-utilities plugin namespaces instead.
+# sonic-package-manager names each plugin module after the package
+# ("macsec.py"), and clear/plugins/macsec.py imports show.plugins.macsec,
+# so the same naming must be reproduced here.
+COPY --from=macsec cli/config/plugins/macsec.py /tmp/macsec-cli/config/macsec.py
+COPY --from=macsec cli/show/plugins/show_macsec.py /tmp/macsec-cli/show/macsec.py
+COPY --from=macsec cli/clear/plugins/clear_macsec_counter.py /tmp/macsec-cli/clear/macsec.py
+RUN set -e; \
+    for pkg in config show clear; do \
+        dst=$(python3 -c "import ${pkg}.plugins as m, os; print(os.path.dirname(os.path.abspath(m.__file__)))"); \
+        [ -n "$dst" ] && [ -d "$dst" ] || { echo "cannot locate ${pkg}.plugins" >&2; exit 1; }; \
+        cp /tmp/macsec-cli/${pkg}/macsec.py "$dst/macsec.py"; \
+    done; \
+    rm -rf /tmp/macsec-cli; \
+    python3 -c "import importlib.util as u, sys; sys.exit(0 if all(u.find_spec(m) for m in ('show.plugins.macsec','config.plugins.macsec','clear.plugins.macsec')) else 1)"
 
 # Create /var/warmboot/teamd folder for teammgrd
 RUN mkdir -p /var/warmboot/teamd

@@ -20,8 +20,10 @@ RUN apt-get update
 
 COPY ["supervisord.conf", "/etc/supervisor/conf.d/"]
 COPY ["critical_processes", "/etc/supervisor"]
-COPY ["etc/wpa_supplicant.conf", "/etc/wpa_supplicant.conf"]
 COPY ["cli", "/cli/"]
+
+# MACsec feature files shared with docker-sonic-vs
+{% include "Dockerfile.common.j2" %}
 
 FROM $BASE
 
