@@ -1,0 +1,7 @@
+{# Common Dockerfile for docker-macsec
+   Shared between standalone docker-macsec and docker-sonic-vs.
+   Installs the wpa_supplicant configuration consumed by macsecmgrd.
+   When included via --build-context, set copy_from="macsec" to use COPY --from=macsec
+#}
+{% set _from = "--from=" + copy_from + " " if copy_from is defined else "" %}
+COPY {{ _from }}["etc/wpa_supplicant.conf", "/etc/wpa_supplicant.conf"]
