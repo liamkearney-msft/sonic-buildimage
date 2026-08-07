@@ -34,6 +34,10 @@ RUN apt-get install -y net-tools \
                        iptables \
                        jq \
                        uuid-dev \
+                       # SNMP client tools, so cSONiC neighbours can source SNMP
+                       # queries. A real SONiC host gets these from the snmp
+                       # container, but docker-sonic-vs is a single flat image.
+                       snmp \
                        # For installing Python m2crypto package
                        # (these can be uninstalled after installation)
                        build-essential \
