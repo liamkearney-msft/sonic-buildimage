@@ -226,23 +226,25 @@ def add_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fallb
 #
 @macsec_profile.command('update')
 @click.argument('profile', metavar='<profile_name>', required=True)
-@click.option('--primary_cak', metavar='<primary_cak>', required=False, default=None, type=str, help="Primary Connectivity Association Key. Must be given together with --primary_ckn and cannot be combined with the fallback options.")
-@click.option('--primary_ckn', metavar='<primary_ckn>', required=False, default=None, type=str, help="Primary CAK Name. Must be given together with --primary_cak.")
-@click.option('--fallback_cak', metavar='<fallback_cak>', required=False, default=None, type=str, help="Fallback Connectivity Association Key. Must be given together with --fallback_ckn and cannot be combined with the primary options.")
-@click.option('--fallback_ckn', metavar='<fallback_ckn>', required=False, default=None, type=str, help="Fallback CAK Name. Must be given together with --fallback_cak and must differ from the primary CKN.")
-def update_profile(profile, primary_cak, primary_ckn, fallback_cak, fallback_ckn):
+@click.option('--old_ckn', metavar='<old_ckn>', required=True, type=str, help="CAK Name of the key being replaced. It selects which CA of the profile is rotated, so it has to match the profile's current primary CKN or its fallback CKN.")
+@click.option('--new_ckn', metavar='<new_ckn>', required=True, type=str, help="New CAK Name. Must differ from the old CKN and from the CKN of the other CA of the profile.")
+@click.option('--new_cak', metavar='<new_cak>', required=True, type=str, help="New Connectivity Association Key, of the length required by the cipher suite of the profile.")
+def update_profile(profile, old_ckn, new_ckn, new_cak):
     """
-    Update the keys of a MACsec profile
+    Rotate one of the keys of a MACsec profile
 
-    Replaces the primary key or the fallback key of an existing profile in
-    place. Every other field of the profile is left as it is, and ports already
-    running the profile pick the new key up without their MKA session being
-    restarted.
+    Replaces the key named by --old_ckn with the key given by --new_ckn and
+    --new_cak. The old CKN selects which CA is rotated, so exactly one key is
+    touched per invocation and the other one stays live to protect the port
+    while its peer is replaced. Every other field of the profile is left as it
+    is.
 
-    A single invocation may touch one key only: either the primary key or the
-    fallback key, never both. Rotating the primary key relies on the already
-    configured fallback key to protect the port while the primary CA is being
-    replaced, so the fallback must be established by an earlier update.
+    A CA is keyed by its CKN, so a rotation always establishes a new CKN. The
+    CAK of a CKN that is already running cannot be replaced in place and
+    re-using the old CKN is rejected.
+
+    Keys can only be rotated, not added or removed: a profile that needs a
+    fallback key it wasn't created with has to be deleted and added again.
     """
     ctx = click.get_current_context()
     config_db = ctx.obj
@@ -251,74 +253,63 @@ def update_profile(profile, primary_cak, primary_ckn, fallback_cak, fallback_ckn
     if len(profile_entry) == 0:
         ctx.fail("{} doesn't exist".format(profile))
 
-    if (primary_cak is None) != (primary_ckn is None):
-        ctx.fail("Expect --primary_cak and --primary_ckn are provided together")
-    if (fallback_cak is None) != (fallback_ckn is None):
-        ctx.fail("Expect --fallback_cak and --fallback_ckn are provided together")
-    if primary_cak is None and fallback_cak is None:
-        ctx.fail("Expect either the primary key or the fallback key to update")
-    # Only one CA may be modified at a time: the other one has to stay live to
-    # protect the port while its peer is being replaced.
-    if primary_cak is not None and fallback_cak is not None:
-        ctx.fail(
-            "Expect the primary key and the fallback key are not updated at "
-            "the same time, update one of them at a time")
+    primary_ckn = profile_entry.get("primary_ckn", "")
+    fallback_ckn = profile_entry.get("fallback_ckn", "")
 
-    profile_table = dict(profile_entry)
+    # The old CKN names the CA to rotate. Anything else would be a request to
+    # add a key rather than replace one, which this command does not do.
+    if old_ckn.lower() == primary_ckn.lower():
+        rotating_primary = True
+    elif fallback_ckn and old_ckn.lower() == fallback_ckn.lower():
+        rotating_primary = False
+    else:
+        ctx.fail(
+            "Expect the old_ckn matches the primary_ckn or the fallback_ckn of "
+            "{}, a key that is not configured cannot be rotated".format(profile))
+
+    # A participant is keyed by its CKN, so re-using it would leave the running
+    # MKA session on the old CAK until wpa_supplicant restarts instead of
+    # rotating the CA.
+    if new_ckn.lower() == old_ckn.lower():
+        ctx.fail(
+            "Expect the new_ckn is different from the old_ckn, the CAK of a "
+            "CKN that is already established cannot be replaced in place")
+
     # The cipher suite of the stored profile fixes the length the new key has
     # to satisfy.
     cipher_suite = profile_entry.get("cipher_suite", DEFAULT_CIPHER_SUITE)
 
-    if primary_cak is not None:
-        validate_cak(ctx, cipher_suite, primary_cak, "primary_cak")
-        validate_ckn(ctx, primary_ckn, "primary_ckn")
-        # Reusing the fallback's CKN for the new primary would promote the
-        # standby rather than rotate the primary, leaving the port with a
-        # single CA. macsecmgr and the YANG model both reject it.
-        if primary_ckn.lower() == profile_entry.get("fallback_ckn", "").lower():
-            ctx.fail(
-                "Expect the new primary_ckn is different from the fallback_ckn "
-                "of {}, the fallback key has to stay in place to protect the "
-                "port while the primary key is rotated".format(profile))
-        profile_table["primary_cak"] = primary_cak
-        profile_table["primary_ckn"] = primary_ckn
-    else:
-        validate_fallback(
-            ctx,
-            cipher_suite,
-            profile_entry.get("primary_ckn", ""),
-            fallback_cak,
-            fallback_ckn)
-        profile_table["fallback_cak"] = fallback_cak
-        profile_table["fallback_ckn"] = fallback_ckn
+    profile_table = dict(profile_entry)
 
-    ports = ports_using_profile(config_db, profile)
-    primary_ckn_changed = primary_ckn is not None \
-        and primary_ckn.lower() != profile_entry.get("primary_ckn", "").lower()
+    if rotating_primary:
+        validate_cak(ctx, cipher_suite, new_cak, "new_cak")
+        validate_ckn(ctx, new_ckn, "new_ckn")
+        # Taking over the fallback's CKN would promote the standby rather than
+        # rotate the primary, leaving the port with a single CA. macsecmgr and
+        # the YANG model both reject it.
+        if fallback_ckn and new_ckn.lower() == fallback_ckn.lower():
+            ctx.fail(
+                "Expect the new_ckn is different from the fallback_ckn of {}, "
+                "the fallback key has to stay in place to protect the port "
+                "while the primary key is rotated".format(profile))
+        profile_table["primary_cak"] = new_cak
+        profile_table["primary_ckn"] = new_ckn
+    else:
+        validate_fallback(ctx, cipher_suite, primary_ckn, new_cak, new_ckn)
+        profile_table["fallback_cak"] = new_cak
+        profile_table["fallback_ckn"] = new_ckn
 
     # macsecmgr rotates the primary CA by retiring the running participant
     # before adding its replacement, and leans on the fallback CA to carry
-    # traffic in between. Without a fallback already established it refuses the
+    # traffic in between. Without a fallback established it refuses the
     # rotation, so reject it here rather than leaving the change stuck in
     # CONFIG_DB.
-    if ports and primary_ckn_changed and not profile_entry.get("fallback_ckn"):
+    ports = ports_using_profile(config_db, profile)
+    if ports and rotating_primary and not fallback_ckn:
         ctx.fail(
             "{} is in use by {} and has no fallback key, so its primary key "
-            "cannot be rotated without leaving the ports unprotected. Add a "
-            "fallback key first with 'config macsec profile update {} "
-            "--fallback_cak <cak> --fallback_ckn <ckn>'.".format(
-                profile, ", ".join(ports), profile))
-
-    # A participant is keyed by its CKN, so the same CKN cannot be re-keyed on a
-    # running session and the new CAK only lands on the next restart.
-    if ports and primary_cak is not None and not primary_ckn_changed \
-            and primary_cak != profile_entry.get("primary_cak"):
-        click.echo(
-            "Warning: the primary CKN of {} is unchanged, so the new primary "
-            "CAK cannot be installed on the running MKA sessions and only "
-            "takes effect when wpa_supplicant next restarts. Rotate the CKN "
-            "along with the CAK for a hitless change.".format(profile),
-            err=True)
+            "cannot be rotated without leaving the ports unprotected".format(
+                profile, ", ".join(ports)))
 
     # Every stored value is already a string and both keys are strings, so the
     # entry can be written back as it is.
