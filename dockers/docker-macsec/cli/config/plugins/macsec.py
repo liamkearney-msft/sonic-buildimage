@@ -228,9 +228,9 @@ def add_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fallb
 @click.argument('profile', metavar='<profile_name>', required=True)
 @click.option('--priority', metavar='<priority>', required=False, default=None, type=click.IntRange(0, 255), help="For Key server election. In 0-255 range with 0 being the highest priority.")
 @click.option('--cipher_suite', metavar='<cipher_suite>', required=False, default=None, type=click.Choice(CIPHER_SUITES), help="The cipher suite for MACsec.")
-@click.option('--primary_cak', metavar='<primary_cak>', required=False, default=None, type=str, help="Primary Connectivity Association Key. Must be given together with --primary_ckn.")
+@click.option('--primary_cak', metavar='<primary_cak>', required=False, default=None, type=str, help="Primary Connectivity Association Key. Must be given together with --primary_ckn and cannot be combined with the fallback options.")
 @click.option('--primary_ckn', metavar='<primary_ckn>', required=False, default=None, type=str, help="Primary CAK Name. Must be given together with --primary_cak.")
-@click.option('--fallback_cak', metavar='<fallback_cak>', required=False, default=None, type=str, help="Fallback Connectivity Association Key. Must be given together with --fallback_ckn.")
+@click.option('--fallback_cak', metavar='<fallback_cak>', required=False, default=None, type=str, help="Fallback Connectivity Association Key. Must be given together with --fallback_ckn and cannot be combined with the primary options.")
 @click.option('--fallback_ckn', metavar='<fallback_ckn>', required=False, default=None, type=str, help="Fallback CAK Name. Must be given together with --fallback_cak and must differ from the primary CKN.")
 @click.option('--remove_fallback', required=False, default=False, is_flag=True, help="Remove the fallback key from the profile, retiring the standby CA on every port running it.")
 @click.option('--policy', metavar='<policy>', required=False, default=None, type=click.Choice(["integrity_only", "security"]), help="MACsec policy. INTEGRITY_ONLY: All traffic, except EAPOL, will be converted to MACsec packets without encryption.  SECURITY: All traffic, except EAPOL, will be encrypted by SecY.")
@@ -244,8 +244,12 @@ def update_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fa
 
     Only the fields named on the command line are changed; the rest of the
     profile is left as it is. Ports already running the profile pick the change
-    up without their MKA session being restarted, so rotating the primary key
-    on a port that has a fallback key is hitless.
+    up without their MKA session being restarted.
+
+    A single invocation may touch at most one key: either the primary key or
+    the fallback key, never both. Rotating the primary key relies on the
+    already configured fallback key to protect the port while the primary CA is
+    being replaced, so the fallback must be established by an earlier update.
     """
     ctx = click.get_current_context()
     config_db = ctx.obj
@@ -260,6 +264,12 @@ def update_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fa
         ctx.fail("Expect --fallback_cak and --fallback_ckn are provided together")
     if remove_fallback and fallback_cak is not None:
         ctx.fail("Expect --remove_fallback is not combined with --fallback_cak/--fallback_ckn")
+    # Only one CA may be modified at a time: the other one has to stay live to
+    # protect the port while its peer is being replaced.
+    if primary_cak is not None and (fallback_cak is not None or remove_fallback):
+        ctx.fail(
+            "Expect the primary key and the fallback key are not updated at "
+            "the same time, update one of them at a time")
 
     if all(option is None for option in (
             priority, cipher_suite, primary_cak, fallback_cak, policy,
@@ -276,6 +286,14 @@ def update_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fa
         profile_table["cipher_suite"] = cipher_suite
 
     if primary_cak is not None:
+        # Reusing the fallback's CKN for the new primary would promote the
+        # standby rather than rotate the primary, leaving the port with a
+        # single CA. macsecmgr and the YANG model both reject it.
+        if primary_ckn.lower() == profile_entry.get("fallback_ckn", "").lower():
+            ctx.fail(
+                "Expect the new primary_ckn is different from the fallback_ckn "
+                "of {}, the fallback key has to stay in place to protect the "
+                "port while the primary key is rotated".format(profile))
         profile_table["primary_cak"] = primary_cak
         profile_table["primary_ckn"] = primary_ckn
 
