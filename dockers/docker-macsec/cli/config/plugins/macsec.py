@@ -226,30 +226,23 @@ def add_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fallb
 #
 @macsec_profile.command('update')
 @click.argument('profile', metavar='<profile_name>', required=True)
-@click.option('--priority', metavar='<priority>', required=False, default=None, type=click.IntRange(0, 255), help="For Key server election. In 0-255 range with 0 being the highest priority.")
-@click.option('--cipher_suite', metavar='<cipher_suite>', required=False, default=None, type=click.Choice(CIPHER_SUITES), help="The cipher suite for MACsec.")
 @click.option('--primary_cak', metavar='<primary_cak>', required=False, default=None, type=str, help="Primary Connectivity Association Key. Must be given together with --primary_ckn and cannot be combined with the fallback options.")
 @click.option('--primary_ckn', metavar='<primary_ckn>', required=False, default=None, type=str, help="Primary CAK Name. Must be given together with --primary_cak.")
 @click.option('--fallback_cak', metavar='<fallback_cak>', required=False, default=None, type=str, help="Fallback Connectivity Association Key. Must be given together with --fallback_ckn and cannot be combined with the primary options.")
 @click.option('--fallback_ckn', metavar='<fallback_ckn>', required=False, default=None, type=str, help="Fallback CAK Name. Must be given together with --fallback_cak and must differ from the primary CKN.")
-@click.option('--remove_fallback', required=False, default=False, is_flag=True, help="Remove the fallback key from the profile, retiring the standby CA on every port running it.")
-@click.option('--policy', metavar='<policy>', required=False, default=None, type=click.Choice(["integrity_only", "security"]), help="MACsec policy. INTEGRITY_ONLY: All traffic, except EAPOL, will be converted to MACsec packets without encryption.  SECURITY: All traffic, except EAPOL, will be encrypted by SecY.")
-@click.option('--enable_replay_protect/--disable_replay_protect', metavar='<replay_protect>', required=False, default=None, is_flag=True, help="Whether enable replay protect.")
-@click.option('--replay_window', metavar='<replay_window>', required=False, default=None, type=click.IntRange(0, 2**32), help="Replay window size that is the number of packets that could be out of order. This field works only if ENABLE_REPLAY_PROTECT is true.")
-@click.option('--send_sci/--no_send_sci', metavar='<send_sci>', required=False, default=None, is_flag=True, help="Send SCI in SecTAG field of MACsec header.")
-@click.option('--rekey_period', metavar='<rekey_period>', required=False, default=None, type=click.IntRange(min=0), help="The period of proactively refresh (Unit second).")
-def update_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fallback_cak, fallback_ckn, remove_fallback, policy, enable_replay_protect, replay_window, send_sci, rekey_period):
+def update_profile(profile, primary_cak, primary_ckn, fallback_cak, fallback_ckn):
     """
-    Update MACsec profile
+    Update the keys of a MACsec profile
 
-    Only the fields named on the command line are changed; the rest of the
-    profile is left as it is. Ports already running the profile pick the change
-    up without their MKA session being restarted.
+    Replaces the primary key or the fallback key of an existing profile in
+    place. Every other field of the profile is left as it is, and ports already
+    running the profile pick the new key up without their MKA session being
+    restarted.
 
-    A single invocation may touch at most one key: either the primary key or
-    the fallback key, never both. Rotating the primary key relies on the
-    already configured fallback key to protect the port while the primary CA is
-    being replaced, so the fallback must be established by an earlier update.
+    A single invocation may touch one key only: either the primary key or the
+    fallback key, never both. Rotating the primary key relies on the already
+    configured fallback key to protect the port while the primary CA is being
+    replaced, so the fallback must be established by an earlier update.
     """
     ctx = click.get_current_context()
     config_db = ctx.obj
@@ -262,30 +255,23 @@ def update_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fa
         ctx.fail("Expect --primary_cak and --primary_ckn are provided together")
     if (fallback_cak is None) != (fallback_ckn is None):
         ctx.fail("Expect --fallback_cak and --fallback_ckn are provided together")
-    if remove_fallback and fallback_cak is not None:
-        ctx.fail("Expect --remove_fallback is not combined with --fallback_cak/--fallback_ckn")
+    if primary_cak is None and fallback_cak is None:
+        ctx.fail("Expect either the primary key or the fallback key to update")
     # Only one CA may be modified at a time: the other one has to stay live to
     # protect the port while its peer is being replaced.
-    if primary_cak is not None and (fallback_cak is not None or remove_fallback):
+    if primary_cak is not None and fallback_cak is not None:
         ctx.fail(
             "Expect the primary key and the fallback key are not updated at "
             "the same time, update one of them at a time")
 
-    if all(option is None for option in (
-            priority, cipher_suite, primary_cak, fallback_cak, policy,
-            enable_replay_protect, replay_window, send_sci, rekey_period)) \
-            and not remove_fallback:
-        ctx.fail("Expect at least one field to update")
-
     profile_table = dict(profile_entry)
-
-    if priority is not None:
-        profile_table["priority"] = priority
-
-    if cipher_suite is not None:
-        profile_table["cipher_suite"] = cipher_suite
+    # The cipher suite of the stored profile fixes the length the new key has
+    # to satisfy.
+    cipher_suite = profile_entry.get("cipher_suite", DEFAULT_CIPHER_SUITE)
 
     if primary_cak is not None:
+        validate_cak(ctx, cipher_suite, primary_cak, "primary_cak")
+        validate_ckn(ctx, primary_ckn, "primary_ckn")
         # Reusing the fallback's CKN for the new primary would promote the
         # standby rather than rotate the primary, leaving the port with a
         # single CA. macsecmgr and the YANG model both reject it.
@@ -296,59 +282,15 @@ def update_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fa
                 "port while the primary key is rotated".format(profile))
         profile_table["primary_cak"] = primary_cak
         profile_table["primary_ckn"] = primary_ckn
-
-    if remove_fallback:
-        # Dropping the fields makes set_entry delete them, which is how
-        # macsecmgr is told to retire the standby CA.
-        profile_table.pop("fallback_cak", None)
-        profile_table.pop("fallback_ckn", None)
-    elif fallback_cak is not None:
-        profile_table["fallback_cak"] = fallback_cak
-        profile_table["fallback_ckn"] = fallback_ckn
-
-    if policy is not None:
-        profile_table["policy"] = policy
-
-    if send_sci is not None:
-        profile_table["send_sci"] = send_sci
-
-    if enable_replay_protect is not None or replay_window is not None:
-        # replay_window only exists while replay protection is on, so the two
-        # fields are always resolved together against the stored profile.
-        effective_protect = enable_replay_protect
-        if effective_protect is None:
-            effective_protect = profile_table.get("enable_replay_protect") == "true"
-        effective_window = replay_window
-        if effective_window is None:
-            effective_window = int(profile_table.get("replay_window", 0))
-        if effective_protect and effective_window > 0:
-            profile_table["enable_replay_protect"] = effective_protect
-            profile_table["replay_window"] = effective_window
-        else:
-            profile_table.pop("enable_replay_protect", None)
-            profile_table.pop("replay_window", None)
-
-    if rekey_period is not None:
-        if rekey_period > 0:
-            profile_table["rekey_period"] = rekey_period
-        else:
-            profile_table.pop("rekey_period", None)
-
-    if "primary_cak" not in profile_table or "primary_ckn" not in profile_table:
-        ctx.fail("{} has no primary key configured".format(profile))
-
-    # Validate the whole resulting profile rather than only the new fields: a
-    # cipher suite change alters the CAK length the stored keys have to satisfy.
-    effective_cipher_suite = profile_table.get("cipher_suite", DEFAULT_CIPHER_SUITE)
-    validate_cak(ctx, effective_cipher_suite, profile_table["primary_cak"], "primary_cak")
-    validate_ckn(ctx, profile_table["primary_ckn"], "primary_ckn")
-    if "fallback_cak" in profile_table:
+    else:
         validate_fallback(
             ctx,
-            effective_cipher_suite,
-            profile_table["primary_ckn"],
-            profile_table["fallback_cak"],
-            profile_table["fallback_ckn"])
+            cipher_suite,
+            profile_entry.get("primary_ckn", ""),
+            fallback_cak,
+            fallback_ckn)
+        profile_table["fallback_cak"] = fallback_cak
+        profile_table["fallback_ckn"] = fallback_ckn
 
     ports = ports_using_profile(config_db, profile)
     primary_ckn_changed = primary_ckn is not None \
@@ -378,14 +320,8 @@ def update_profile(profile, priority, cipher_suite, primary_cak, primary_ckn, fa
             "along with the CAK for a hitless change.".format(profile),
             err=True)
 
-    for k, v in profile_table.items():
-        if isinstance(v, bool):
-            if v:
-                profile_table[k] = "true"
-            else:
-                profile_table[k] = "false"
-        else:
-            profile_table[k] = str(v)
+    # Every stored value is already a string and both keys are strings, so the
+    # entry can be written back as it is.
     config_db.set_entry("MACSEC_PROFILE", profile, profile_table)
 
 
