@@ -162,13 +162,12 @@ class TestShowMACsec(object):
             "Principal",
             "CKN",
             "Role",
-            "Primary",
-            "live",
-            "peers",
-            "Fallback",
+            "prim./fall.",
             "live",
             "peers",
             "Local-KS",
+            "Keys",
+            "distributed",
             "Status",
             "Age",
         ]
@@ -225,6 +224,55 @@ class TestShowMACsec(object):
         assert show_macsec._format_milliseconds(None) == "-"
         assert show_macsec._format_milliseconds("invalid") == "-"
         assert show_macsec._format_milliseconds("2000") == "2000 ms"
+
+    @patch.object(show_macsec.MacsecContext, "collect_mka", autospec=True)
+    def test_show_mka_compact_keys_distributed_is_strict_and_secret_safe(
+            self, collect_mka):
+        valid = mka_record()
+        valid["interface"] = "Ethernet0"
+        valid["session"]["keys_distributed"] = "12"
+
+        missing = mka_record()
+        missing["interface"] = "Ethernet4"
+        del missing["session"]["keys_distributed"]
+
+        malformed = mka_record()
+        malformed["interface"] = "Ethernet8"
+        malformed["session"]["keys_distributed"] = "not-a-count"
+
+        numeric_secret = "12" * 33
+        poisoned = mka_record()
+        poisoned["interface"] = "Ethernet12"
+        poisoned["session"]["keys_distributed"] = numeric_secret
+        poisoned["secrets"] = [numeric_secret, numeric_secret[2:]]
+
+        collect_mka.side_effect = populate_mka_records([
+            poisoned,
+            malformed,
+            missing,
+            valid,
+        ])
+        runner = CliRunner()
+        result = runner.invoke(show_macsec.macsec, ["--mka"])
+
+        assert result.exit_code == 0, result.output
+        header = result.output.splitlines()[0].split()
+        assert "Keys" in header
+        assert "distributed" in header
+        rows = {
+            columns[0]: columns
+            for columns in (
+                line.split()
+                for line in result.output.splitlines()
+                if line.startswith("Ethernet")
+            )
+        }
+        assert rows["Ethernet0"][-3] == "12"
+        assert rows["Ethernet4"][-3] == "-"
+        assert rows["Ethernet8"][-3] == "-"
+        assert rows["Ethernet12"][-3] == "-"
+        assert numeric_secret not in result.output
+        assert numeric_secret[2:] not in result.output
 
     def test_config_error_redacts_cak_shapes_without_hiding_ckn(self):
         decoded_current_cak = secret_cak[2:]
@@ -288,7 +336,7 @@ class TestShowMACsec(object):
     def test_show_mka_compact_live_peers_by_configured_role(self, collect_mka):
         primary_principal = mka_record()
         primary_principal["interface"] = "Ethernet0"
-        primary_principal["participants"][0]["live_peers"] = "2"
+        primary_principal["participants"][0]["live_peers"] = "1"
         primary_principal["participants"][1]["live_peers"] = "1"
 
         fallback_principal_primary_live = mka_record()
@@ -356,13 +404,12 @@ class TestShowMACsec(object):
             "Principal",
             "CKN",
             "Role",
-            "Primary",
-            "live",
-            "peers",
-            "Fallback",
+            "prim./fall.",
             "live",
             "peers",
             "Local-KS",
+            "Keys",
+            "distributed",
             "Status",
             "Age",
         ]
@@ -377,12 +424,12 @@ class TestShowMACsec(object):
                 if line.startswith("Ethernet")
             )
         }
-        assert rows["Ethernet0"][4:7] == ["primary", "2", "1"]
-        assert rows["Ethernet4"][4:7] == ["fallback", "3", "4"]
-        assert rows["Ethernet8"][4:7] == ["fallback", "0", "5"]
-        assert rows["Ethernet12"][4:7] == ["primary", "6", "-"]
-        assert rows["Ethernet16"][4:7] == ["primary", "-", "1"]
-        assert rows["Ethernet20"][4:7] == ["primary", "-", "-"]
+        assert rows["Ethernet0"][4:6] == ["primary", "1/1"]
+        assert rows["Ethernet4"][4:6] == ["fallback", "3/4"]
+        assert rows["Ethernet8"][4:6] == ["fallback", "0/5"]
+        assert rows["Ethernet12"][4:6] == ["primary", "6/-"]
+        assert rows["Ethernet16"][4:6] == ["primary", "-/1"]
+        assert rows["Ethernet20"][4:6] == ["primary", "-/-"]
 
     @patch.object(show_macsec.MacsecContext, "collect_mka", autospec=True)
     def test_show_mka_compact_naturally_sorts_interfaces_and_namespaces(self, collect_mka):

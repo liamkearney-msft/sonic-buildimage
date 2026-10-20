@@ -1,5 +1,33 @@
 HOWTO Use Virtual Switch (Docker)
 
+MACsec-enabled cSONiC neighbours
+------------------------------
+
+`docker-sonic-vs` includes `macsecmgrd`, `wpa_supplicant`, and the MACsec
+config/show/clear plugins. These run directly in the flat container; there is
+no nested `macsec` service container. `macsecmgrd` starts after `start.sh`
+completes through supervisord's dependent-startup listener.
+
+Build the Bookworm container after configuring the VS platform:
+
+```
+make configure PLATFORM=vs
+BLDENV=bookworm make -f Makefile.work SONIC_IMAGE_VERSION=<version> target/docker-sonic-vs.gz
+```
+
+The runtime host must provide the Linux MACsec driver, the cipher capabilities
+required by the selected profile, and `/dev/net/tun`. The privileged runtime
+below shares the host kernel; the container does not supply a separate kernel.
+Use isolated network namespaces and synthetic fixture keys for tests. Raw MACsec
+status and diagnostic logs can contain key material and must not be published.
+
+Inside the container, check `supervisorctl status macsecmgrd` and use the native
+`config macsec`, `show macsec`, and `sonic-clear macsec` commands. Configure the
+same test profile on both endpoints and bring the bound ports administratively
+up. Successful process startup alone does not establish MKA or encrypted
+forwarding. Software MACsec tests do not validate physical ASIC offload or
+chassis-fabric behaviour.
+
 
 1. Create a docker with two front panel ports
 

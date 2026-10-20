@@ -149,14 +149,25 @@ def _safe_uint(value):
         return "-"
 
 
+def _matches_known_secret(value, secrets):
+    return (
+        isinstance(value, str) and
+        any(
+            value.lower() == secret.lower() or
+            (len(secret) in (66, 130) and value.lower() == secret[2:].lower())
+            for secret in secrets
+        )
+    )
+
+
+def _safe_uint_not_secret(value, secrets):
+    return "-" if _matches_known_secret(value, secrets) else _safe_uint(value)
+
+
 def _safe_hex(value, lengths, secrets=()):
     if not isinstance(value, str) or len(value) not in lengths:
         return "-"
-    if any(
-        value.lower() == secret.lower() or
-        (len(secret) in (66, 130) and value.lower() == secret[2:].lower())
-        for secret in secrets
-    ):
+    if _matches_known_secret(value, secrets):
         return "-"
     if re.fullmatch(r"[0-9a-fA-F]+", value) is None:
         return "-"
@@ -696,6 +707,9 @@ class MacsecContext(object):
             fallback_live_peers = _role_live_peers(
                 record["participants"], "false"
             )
+            live_peers = "{}/{}".format(
+                primary_live_peers, fallback_live_peers
+            )
             age = _age_seconds(session.get("last_updated"))
             row = [
                 record["interface"],
@@ -703,9 +717,11 @@ class MacsecContext(object):
                 _safe_bool(session.get("secured")),
                 principal_ckn,
                 role,
-                primary_live_peers,
-                fallback_live_peers,
+                live_peers,
                 _safe_bool(session.get("is_key_server")),
+                _safe_uint_not_secret(
+                    session.get("keys_distributed"), record["secrets"]
+                ),
                 _compact_status(session, age),
                 _age_label(age),
             ]
@@ -719,9 +735,9 @@ class MacsecContext(object):
             "Secured",
             "Principal CKN",
             "Role",
-            "Primary live peers",
-            "Fallback live peers",
+            "prim./fall. live peers",
             "Local-KS",
+            "Keys distributed",
             "Status",
             "Age",
         ]
