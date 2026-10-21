@@ -312,8 +312,8 @@ class TestConfigMACsec(object):
         assert profile_table["fallback_cak"] == fallback_cak
         assert profile_table["fallback_ckn"] == fallback_ckn
         assert result.output == (
-            "Desired MACsec profile updated; runtime key rotation may be "
-            "deferred per port until safe.\n"
+            "Desired MACsec profile updated; runtime key rotation is applied "
+            "best-effort per port and may retry after WPA command failure.\n"
         )
         assert replacement_cak not in result.output
         cfgdb.set_entry.assert_called_once_with(

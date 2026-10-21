@@ -284,8 +284,8 @@ def update_profile(profile, old_ckn, new_ckn, new_cak):
     config_db.set_entry("MACSEC_PROFILE", profile, replacement)
     if attached:
         click.echo(
-            "Desired MACsec profile updated; runtime key rotation may be "
-            "deferred per port until safe."
+            "Desired MACsec profile updated; runtime key rotation is applied "
+            "best-effort per port and may retry after WPA command failure."
         )
 
 
