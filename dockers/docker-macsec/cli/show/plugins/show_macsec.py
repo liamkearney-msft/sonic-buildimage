@@ -22,7 +22,6 @@ COUNTER_TABLE = None
 
 MKA_SESSION_TABLE = "MACSEC_MKA_SESSION_TABLE"
 MKA_PARTICIPANT_TABLE = "MACSEC_MKA_PARTICIPANT_TABLE"
-MKA_STALE_THRESHOLD_SECONDS = 60
 MKA_SESSION_FIELDS = (
     "profile",
     "kay_status",
@@ -37,8 +36,6 @@ MKA_SESSION_FIELDS = (
     "keys_distributed",
     "keys_received",
     "mka_hello_time_ms",
-    "query_status",
-    "last_updated",
     "config_status",
     "config_error",
 )
@@ -57,80 +54,6 @@ MKA_PARTICIPANT_FIELDS = (
 
 def _allowlisted_fields(entry, allowlist):
     return {field: entry[field] for field in allowlist if field in entry}
-
-
-def _parse_utc_timestamp(timestamp):
-    if not timestamp:
-        return None
-    try:
-        value = timestamp
-        if value.endswith("Z"):
-            value = value[:-1] + "+00:00"
-        parsed = datetime.datetime.fromisoformat(value)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-        return parsed.astimezone(datetime.timezone.utc)
-    except (AttributeError, TypeError, ValueError):
-        return None
-
-
-def _freshness(last_updated, query_status, now=None):
-    parsed = _parse_utc_timestamp(last_updated)
-    if parsed is None:
-        return "never", "never"
-
-    if now is None:
-        now = datetime.datetime.now(datetime.timezone.utc)
-    age = max(0, (now - parsed).total_seconds())
-    flags = []
-    if age > MKA_STALE_THRESHOLD_SECONDS:
-        flags.append("stale")
-    if query_status == "error":
-        flags.append("retained")
-    elif query_status != "ok":
-        flags.append("query-unknown")
-
-    suffix = " ({})".format(", ".join(flags)) if flags else ""
-    compact = "{}s{}".format(int(age), suffix)
-    detail_suffix = "; {}".format(", ".join(flags)) if flags else ""
-    detail = "{} ({}s ago{})".format(last_updated, int(age), detail_suffix)
-    return compact, detail
-
-
-def _age_seconds(last_updated, now=None):
-    parsed = _parse_utc_timestamp(last_updated)
-    if parsed is None:
-        return None
-    if now is None:
-        now = datetime.datetime.now(datetime.timezone.utc)
-    return max(0, (now - parsed).total_seconds())
-
-
-def _age_label(age):
-    return "never" if age is None else "{}s".format(int(age))
-
-
-def _compact_status(session, age):
-    flags = []
-    query_status = session.get("query_status")
-    config_status = session.get("config_status")
-
-    if query_status == "error":
-        flags.append("query-error")
-    elif query_status != "ok":
-        flags.append("query-unknown")
-
-    if age is None:
-        flags.append("age-unknown")
-    elif age > MKA_STALE_THRESHOLD_SECONDS:
-        flags.append("stale")
-
-    if config_status == "degraded":
-        flags.append("config-degraded")
-    elif config_status != "in-sync":
-        flags.append("config-unknown")
-
-    return ",".join(flags) if flags else "ok"
 
 
 def _safe_enum(value, values):
@@ -622,6 +545,8 @@ class MacsecContext(object):
                 continue
 
             raw_session = self.db.get_all(self.db.STATE_DB, session_key)
+            if not raw_session:
+                continue
             session = _allowlisted_fields(raw_session, MKA_SESSION_FIELDS)
             participant_prefix = separator.join(
                 (MKA_PARTICIPANT_TABLE, current_interface)
@@ -630,16 +555,22 @@ class MacsecContext(object):
                 self.db.STATE_DB, participant_prefix + "*"
             ) or []
             participants = []
+            complete_snapshot = True
             for participant_key in natsorted(participant_keys):
                 ckn = participant_key[len(participant_prefix):]
                 raw_participant = self.db.get_all(
                     self.db.STATE_DB, participant_key
                 )
+                if not raw_participant:
+                    complete_snapshot = False
+                    break
                 participant = _allowlisted_fields(
                     raw_participant, MKA_PARTICIPANT_FIELDS
                 )
                 participant["ckn"] = ckn
                 participants.append(participant)
+            if not complete_snapshot:
+                continue
 
             port = self.config_db.get_entry("PORT", current_interface)
             profile_name = port.get("macsec") or session.get("profile")
@@ -672,10 +603,6 @@ class MacsecContext(object):
             key=lambda record: (record["interface"], record["namespace"] or ""),
         )
         if not records:
-            if interface_name is None:
-                click.echo("No MACsec MKA session state found")
-            else:
-                click.echo("MACsec MKA session state for {} is missing".format(interface_name))
             return
 
         if interface_name is None:
@@ -710,7 +637,6 @@ class MacsecContext(object):
             live_peers = "{}/{}".format(
                 primary_live_peers, fallback_live_peers
             )
-            age = _age_seconds(session.get("last_updated"))
             row = [
                 record["interface"],
                 _safe_enum(session.get("kay_status"), ("active", "not-active")),
@@ -722,8 +648,6 @@ class MacsecContext(object):
                 _safe_uint_not_secret(
                     session.get("keys_distributed"), record["secrets"]
                 ),
-                _compact_status(session, age),
-                _age_label(age),
             ]
             if show_namespace:
                 row.insert(0, record["namespace"] or "-")
@@ -738,8 +662,6 @@ class MacsecContext(object):
             "prim./fall. live peers",
             "Local-KS",
             "Keys distributed",
-            "Status",
-            "Age",
         ]
         if show_namespace:
             headers.insert(0, "Namespace")
@@ -756,9 +678,6 @@ class MacsecContext(object):
                 click.echo("Namespace:            {}".format(record["namespace"]))
 
             session = record["session"]
-            _, freshness = _freshness(
-                session.get("last_updated"), session.get("query_status")
-            )
             fields = [
                 ("Interface", record["interface"]),
                 ("Profile", _redact_known_secrets(
@@ -787,13 +706,9 @@ class MacsecContext(object):
                 ("MKA hello time", _format_milliseconds(
                     session.get("mka_hello_time_ms")
                 )),
-                ("Query status", _safe_enum(
-                    session.get("query_status"), ("ok", "error")
-                )),
                 ("Config status", _safe_enum(
                     session.get("config_status"), ("in-sync", "degraded")
                 )),
-                ("Last updated", freshness),
             ]
             for label, value in fields:
                 click.echo("{:<22} {}".format(label + ":", value))
@@ -827,8 +742,8 @@ class MacsecContext(object):
                     _safe_uint(participant.get("mn")),
                 ])
 
-            click.echo("")
             if participant_rows:
+                click.echo("")
                 click.echo(tabulate(
                     participant_rows,
                     headers=[
@@ -844,9 +759,6 @@ class MacsecContext(object):
                         "MN",
                     ],
                 ))
-            else:
-                click.echo("No MACsec MKA participant state found")
-
     @multi_asic_util.run_on_multi_asic
     def show_post_status(self):
         """Show POST (Pre-Operational Self-Test) status"""
